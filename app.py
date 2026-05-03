@@ -2,44 +2,178 @@ import os
 import secrets
 import json
 import time
-import re
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, abort, send_file
-from models import db, Integration, ExecutionLog, ApiKey, Webhook, Schedule
-from api_client import APIClient
+from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, desc
 import requests as http_requests
 
+# ================= FLASK APP INIT =================
 app = Flask(__name__)
 
-# Konfigurasi database dari environment variables
-DB_USER = os.getenv('MYSQL_USER', 'api_user')
-DB_PASS = os.getenv('MYSQL_PASSWORD', 'api_pass123')
-DB_HOST = os.getenv('MYSQL_HOST', 'db')
-DB_NAME = os.getenv('MYSQL_DATABASE', 'api_platform')
-app.config['SQLALCHEMY_DATABASE_URI'] = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+# ================= DATABASE CONFIGURATION =================
+# Vercel: must provide DATABASE_URL (PostgreSQL)
+database_url = os.environ.get('DATABASE_URL')
+if not database_url:
+    raise RuntimeError("DATABASE_URL environment variable is not set!")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-change-me')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-change-me')
 
-db.init_app(app)
+db = SQLAlchemy(app)
 
-# Membuat tabel database dan API key default
-with app.app_context():
-    db.create_all()
-    if not ApiKey.query.first():
-        default_key = secrets.token_urlsafe(32)
-        api_key = ApiKey(name='default_admin', key=default_key, permissions='admin', is_active=True)
-        db.session.add(api_key)
-        db.session.commit()
-        print(f"Default API Key: {default_key}")
+# ================= MODELS =================
+class Integration(db.Model):
+    __tablename__ = 'integrations'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    description = db.Column(db.Text)
+    endpoint = db.Column(db.String(500), nullable=False)
+    method = db.Column(db.String(10), nullable=False)
+    headers = db.Column(db.Text)          # JSON string
+    auth_type = db.Column(db.String(20), default='none')
+    auth_config = db.Column(db.Text)      # JSON string
+    body_template = db.Column(db.Text)
+    response_mapping = db.Column(db.Text) # JSON mapping
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
 
-# ================= Helper function =================
+class ExecutionLog(db.Model):
+    __tablename__ = 'execution_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    integration_id = db.Column(db.Integer, db.ForeignKey('integrations.id'), nullable=True)
+    status_code = db.Column(db.Integer)
+    response_time_ms = db.Column(db.Float)
+    request_payload = db.Column(db.Text)
+    response_body = db.Column(db.Text)
+    error_message = db.Column(db.Text)
+    success = db.Column(db.Boolean, default=False)
+    executed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    integration = db.relationship('Integration', backref='logs')
+
+class ApiKey(db.Model):
+    __tablename__ = 'api_keys'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    key = db.Column(db.String(64), unique=True, nullable=False)
+    permissions = db.Column(db.String(200))
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Webhook(db.Model):
+    __tablename__ = 'webhooks'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    source_url = db.Column(db.String(200), unique=True)
+    target_integration_id = db.Column(db.Integer, db.ForeignKey('integrations.id'))
+    secret = db.Column(db.String(100))
+    is_active = db.Column(db.Boolean, default=True)
+
+class Schedule(db.Model):
+    __tablename__ = 'schedules'
+    id = db.Column(db.Integer, primary_key=True)
+    integration_id = db.Column(db.Integer, db.ForeignKey('integrations.id'))
+    cron_expression = db.Column(db.String(100))
+    next_run = db.Column(db.DateTime)
+    is_active = db.Column(db.Boolean, default=True)
+
+# ================= INIT DATABASE & DEFAULT API KEY =================
+def init_db():
+    with app.app_context():
+        db.create_all()
+        if not ApiKey.query.first():
+            default_key = secrets.token_urlsafe(32)
+            api_key = ApiKey(name='default_admin', key=default_key, permissions='admin', is_active=True)
+            db.session.add(api_key)
+            db.session.commit()
+            print(f"Default API Key: {default_key}")
+
+# We'll call init_db at startup, but inside app context
+init_db()
+
+# ================= API CLIENT =================
+# Minimal APIClient class (assumes 'execute_integration' method)
+class APIClient:
+    def __init__(self):
+        self.session = http_requests.Session()
+        self.default_params = {}
+
+    def set_custom_headers(self, headers):
+        for k, v in headers.items():
+            self.session.headers[k] = v
+
+    def substitute_variables(self, text, context):
+        # Simple variable substitution {{variable}}
+        if not text:
+            return text
+        import re
+        def replacer(m):
+            key = m.group(1).strip()
+            return str(context.get(key, ''))
+        return re.sub(r'\{\{\s*([^}]+?)\s*\}\}', replacer, text)
+
+    def execute_integration(self, integration, context=None):
+        context = context or {}
+        endpoint = self.substitute_variables(integration['endpoint'], context)
+        method = integration['method']
+        headers = json.loads(integration.get('headers') or '{}')
+        self.set_custom_headers(headers)
+        auth_type = integration.get('auth_type', 'none')
+        auth_config = json.loads(integration.get('auth_config') or '{}')
+        if auth_type == 'bearer':
+            token = auth_config.get('token', '')
+            self.session.headers['Authorization'] = f'Bearer {token}'
+        elif auth_type == 'basic':
+            self.session.auth = (auth_config.get('username', ''), auth_config.get('password', ''))
+        elif auth_type == 'api_key':
+            key_name = auth_config.get('key_name', '')
+            key_value = auth_config.get('key_value', '')
+            location = auth_config.get('location', 'header')
+            if location == 'header':
+                self.session.headers[key_name] = key_value
+            else:
+                self.default_params[key_name] = key_value
+                self.session.params = self.default_params
+        body = integration.get('body_template')
+        json_body = None
+        data_body = None
+        if body:
+            body_str = self.substitute_variables(body, context)
+            try:
+                json_body = json.loads(body_str)
+            except:
+                data_body = body_str
+        start = time.time()
+        try:
+            resp = self.session.request(method, endpoint, json=json_body, data=data_body, timeout=30)
+            elapsed = (time.time() - start) * 1000
+            try:
+                resp_body = resp.json()
+            except:
+                resp_body = resp.text
+            return {
+                'success': resp.status_code < 400,
+                'status_code': resp.status_code,
+                'response_time_ms': round(elapsed, 2),
+                'response_body': resp_body,
+                'error': None
+            }
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            return {
+                'success': False,
+                'status_code': None,
+                'response_time_ms': round(elapsed, 2),
+                'response_body': None,
+                'error': str(e)
+            }
+
 def execute_integration_job(integration_id, context=None):
-    """Jalankan integrasi berdasarkan ID dan simpan log."""
     integration = Integration.query.get(integration_id)
     if not integration or not integration.is_active:
         return {'error': 'Integration not active'}
-    
     client = APIClient()
     integration_dict = {
         'endpoint': integration.endpoint,
@@ -50,7 +184,6 @@ def execute_integration_job(integration_id, context=None):
         'body_template': integration.body_template
     }
     result = client.execute_integration(integration_dict, context or {})
-    
     log = ExecutionLog(
         integration_id=integration.id,
         status_code=result.get('status_code'),
@@ -64,7 +197,7 @@ def execute_integration_job(integration_id, context=None):
     db.session.commit()
     return result
 
-# ================= Halaman Web (Templates) =================
+# ================= ROUTES =================
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -81,7 +214,7 @@ def logs_page():
 def settings_page():
     return render_template('settings.html')
 
-# ================= API Integrations (CRUD) =================
+# --- Integrations CRUD ---
 @app.route('/api/integrations', methods=['GET'])
 def get_integrations():
     integrations = Integration.query.order_by(Integration.created_at.desc()).all()
@@ -142,7 +275,7 @@ def execute_integration(integ_id):
     result = execute_integration_job(integ_id, context)
     return jsonify(result)
 
-# ================= API Logs =================
+# --- Logs ---
 @app.route('/api/logs', methods=['GET'])
 def get_logs():
     page = request.args.get('page', 1, type=int)
@@ -169,7 +302,7 @@ def get_logs():
         'pages': pagination.pages
     })
 
-# ================= API Dashboard Stats =================
+# --- Dashboard Stats ---
 @app.route('/api/dashboard/stats')
 def dashboard_stats():
     total_integrations = Integration.query.count()
@@ -193,7 +326,7 @@ def dashboard_stats():
         'recent_errors': error_items
     })
 
-# ================= API Keys =================
+# --- API Keys ---
 @app.route('/api/api_keys', methods=['GET'])
 def get_api_keys():
     keys = ApiKey.query.all()
@@ -215,7 +348,7 @@ def delete_api_key(key_id):
     db.session.commit()
     return jsonify({'message': 'deleted'})
 
-# ================= Webhooks =================
+# --- Webhooks ---
 @app.route('/api/webhooks', methods=['GET'])
 def get_webhooks():
     webhooks = Webhook.query.all()
@@ -237,7 +370,7 @@ def create_webhook():
     )
     db.session.add(wh)
     db.session.commit()
-    return jsonify({'id': wh.id})
+    return jsonify({'id': wh.id}), 201
 
 @app.route('/api/webhooks/<int:wh_id>', methods=['DELETE'])
 def delete_webhook(wh_id):
@@ -259,7 +392,7 @@ def webhook_receiver(webhook_path):
     result = execute_integration_job(webhook.target_integration_id, {'payload': payload})
     return jsonify({'forwarded': result['success']})
 
-# ================= Schedules =================
+# --- Schedules (CRUD only - no background execution) ---
 @app.route('/api/schedules', methods=['GET'])
 def get_schedules():
     scheds = Schedule.query.all()
@@ -273,14 +406,12 @@ def get_schedules():
 @app.route('/api/schedules', methods=['POST'])
 def create_schedule():
     data = request.json
-    from apscheduler.triggers.cron import CronTrigger
+    # No trigger evaluation in serverless; just store
     sched = Schedule(
         integration_id=data['integration_id'],
         cron_expression=data['cron_expression'],
         is_active=True
     )
-    trigger = CronTrigger.from_crontab(data['cron_expression'])
-    sched.next_run = trigger.get_next_fire_time(None, datetime.now())
     db.session.add(sched)
     db.session.commit()
     return jsonify({'id': sched.id})
@@ -292,7 +423,7 @@ def delete_schedule(sched_id):
     db.session.commit()
     return jsonify({'message': 'deleted'})
 
-# ================= AI Proxy =================
+# --- AI Proxy ---
 @app.route('/api/ai/proxy', methods=['POST'])
 def ai_proxy():
     data = request.json
@@ -313,7 +444,7 @@ def ai_proxy():
             return jsonify({'error': str(e)}), 500
     return jsonify({'error': 'Provider not supported'}), 400
 
-# ================= History (untuk UI Request tab) =================
+# --- History (for UI Request tab) ---
 @app.route('/api/history', methods=['GET'])
 def get_history():
     page = request.args.get('page', 1, type=int)
@@ -321,7 +452,7 @@ def get_history():
     pagination = ExecutionLog.query.order_by(ExecutionLog.executed_at.desc()).paginate(page=page, per_page=per_page)
     items = [{
         'id': l.id,
-        'method': 'GET',   # Tidak disimpan di log, default
+        'method': 'GET',   # default because manual requests are stored without method
         'url': l.integration.endpoint if l.integration else '-',
         'status': l.status_code,
         'time_ms': l.response_time_ms,
@@ -360,7 +491,7 @@ def export_history_json():
     } for l in logs]
     return jsonify(data)
 
-# ================= Analytics Stats (untuk UI) =================
+# --- Analytics Stats (for UI) ---
 @app.route('/api/analytics/stats')
 def analytics_stats():
     total_requests = ExecutionLog.query.count()
@@ -370,7 +501,7 @@ def analytics_stats():
     status_dist = {str(s): count for s, count in status_counts}
     popular = db.session.query(Integration.endpoint, func.count(ExecutionLog.id)).join(ExecutionLog, Integration.id == ExecutionLog.integration_id).group_by(Integration.endpoint).order_by(func.count().desc()).limit(10).all()
     popular_endpoints = [{'url': url, 'count': count} for url, count in popular]
-    # Trend 7 hari terakhir
+    # Last 7 days trend
     last_7_days = []
     for i in range(6, -1, -1):
         date = datetime.utcnow().date() - timedelta(days=i)
@@ -386,7 +517,7 @@ def analytics_stats():
         'response_time_trend': last_7_days
     })
 
-# ================= Send Manual Request (untuk UI Request tab) =================
+# --- Send Manual Request ---
 @app.route('/api/send', methods=['POST'])
 def send_manual_request():
     data = request.json
@@ -401,12 +532,12 @@ def send_manual_request():
         return jsonify({'error': 'URL required'}), 400
 
     client = APIClient()
-    # Headers
+    # parse headers
     for line in headers_raw.split('\n'):
         if ':' in line:
             k, v = line.split(':', 1)
             client.session.headers[k.strip()] = v.strip()
-    # Auth
+    # authentication
     if auth_type == 'bearer':
         client.session.headers['Authorization'] = f"Bearer {auth_data.get('token', '')}"
     elif auth_type == 'basic':
@@ -419,7 +550,8 @@ def send_manual_request():
             client.session.headers[key_name] = key_value
         else:
             client.default_params[key_name] = key_value
-    # Body
+            client.session.params = client.default_params
+    # body
     body = None
     if body_type == 'json' and body_content:
         try:
@@ -428,6 +560,7 @@ def send_manual_request():
             return jsonify({'error': 'Invalid JSON'}), 400
     elif body_type == 'form' and body_content:
         body = body_content
+
     start = time.time()
     try:
         resp = client.session.request(method, url, json=body if isinstance(body, dict) else None,
@@ -437,7 +570,7 @@ def send_manual_request():
             resp_body = resp.json()
         except:
             resp_body = resp.text
-        # Simpan ke log (integration_id = null untuk request manual)
+        # store log (integration_id = None for manual)
         log = ExecutionLog(
             integration_id=None,
             status_code=resp.status_code,
@@ -458,10 +591,9 @@ def send_manual_request():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ================= Environments (untuk kompatibilitas UI) =================
+# --- Environments (dummy for UI compatibility) ---
 @app.route('/api/environments', methods=['GET'])
 def get_environments():
-    # Tidak ada model Environment, kembalikan array kosong agar UI tetap jalan
     return jsonify([])
 
 @app.route('/api/environments', methods=['POST'])
@@ -476,6 +608,5 @@ def update_environment(env_id):
 def delete_environment(env_id):
     return jsonify({'message': 'Not implemented'}), 501
 
-# ================= Menjalankan Aplikasi =================
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=os.getenv('FLASK_DEBUG', 'False') == 'True')
+# ================= This is not used on Vercel (serverless) =================
+# Vercel uses the 'app' object directly.
