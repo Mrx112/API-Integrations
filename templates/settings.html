@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Settings</h1>
+<div class="card">
+    <div class="card-header">API Keys</div>
+    <button id="newApiKeyBtn">Generate API Key</button>
+    <ul id="apiKeysList"></ul>
+</div>
+<script>
+async function loadApiKeys() {
+    const res = await fetch('/api/api_keys');
+    const keys = await res.json();
+    let html = keys.map(k => `<li><strong>${k.name}</strong>: ${k.key} <button onclick="deleteKey(${k.id})">Delete</button></li>`).join('');
+    document.getElementById('apiKeysList').innerHTML = html;
+}
+window.deleteKey = async (id) => {
+    if(confirm('Delete key?')) await fetch(`/api/api_keys/${id}`, { method:'DELETE' });
+    loadApiKeys();
+};
+document.getElementById('newApiKeyBtn').onclick = async () => {
+    const name = prompt('Key name:');
+    if(name) {
+        const res = await fetch('/api/api_keys', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+        const data = await res.json();
+        alert(`New key: ${data.key} – save it now`);
+        loadApiKeys();
+    }
+};
+loadApiKeys();
+</script>
+{% endblock %}

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Integration Platform</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+</head>
+<body>
+    <div class="app-container">
+        <div class="sidebar">
+            <div class="logo-area">
+                <h1><i class="fas fa-plug"></i> API Studio</h1>
+                <p>Integration & Analytics</p>
+            </div>
+            <div class="nav-menu">
+                <a href="/" class="nav-item"><i class="fas fa-tachometer-alt"></i> <span>Dashboard</span></a>
+                <a href="/integrations" class="nav-item"><i class="fas fa-puzzle-piece"></i> <span>Integrations</span></a>
+                <a href="/logs" class="nav-item"><i class="fas fa-history"></i> <span>Logs</span></a>
+                <a href="/settings" class="nav-item"><i class="fas fa-cog"></i> <span>Settings</span></a>
+            </div>
+        </div>
+        <div class="main-content">
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+</body>
+</html>

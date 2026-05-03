@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard">
+    <h1>Dashboard</h1>
+    <div class="stat-grid" id="statsGrid"></div>
+    <div class="card">
+        <div class="card-header"><i class="fas fa-exclamation-triangle"></i> Recent Errors</div>
+        <ul id="errorList"></ul>
+    </div>
+</div>
+<script>
+fetch('/api/dashboard/stats').then(r=>r.json()).then(data=>{
+    document.getElementById('statsGrid').innerHTML = `
+        <div class="stat-card"><h4>Total Integrations</h4><h2>${data.total_integrations}</h2></div>
+        <div class="stat-card"><h4>Active Integrations</h4><h2>${data.active_integrations}</h2></div>
+        <div class="stat-card"><h4>Total Executions</h4><h2>${data.total_executions}</h2></div>
+        <div class="stat-card"><h4>Success Rate</h4><h2>${data.success_rate_percent}%</h2></div>
+        <div class="stat-card"><h4>Avg Response Time</h4><h2>${data.avg_response_time_ms} ms</h2></div>
+    `;
+    let errList = document.getElementById('errorList');
+    if(data.recent_errors.length === 0) errList.innerHTML = '<li>No errors</li>';
+    else errList.innerHTML = data.recent_errors.map(e=>`<li><strong>${e.integration_name}</strong>: ${e.error} (${new Date(e.executed_at).toLocaleString()})</li>`).join('');
+});
+</script>
+{% endblock %}

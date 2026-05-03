@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Integrations <button id="newIntegrationBtn" class="btn-primary">+ New</button></h1>
+<div id="integrationsList" class="cards"></div>
+<script>
+async function loadIntegrations() {
+    const res = await fetch('/api/integrations');
+    const data = await res.json();
+    let html = '<div class="stat-grid">';
+    data.forEach(i => {
+        html += `<div class="stat-card"><h3>${i.name}</h3><p>${i.method} ${i.endpoint}</p><button onclick="executeIntegration(${i.id})">Execute</button> <button onclick="deleteIntegration(${i.id})">Delete</button></div>`;
+    });
+    html += '</div>';
+    document.getElementById('integrationsList').innerHTML = html;
+}
+window.executeIntegration = async (id) => {
+    const ctx = prompt('Context JSON:', '{}');
+    const res = await fetch(`/api/integrations/${id}/execute`, { method:'POST', headers:{'Content-Type':'application/json'}, body:ctx });
+    const result = await res.json();
+    alert(result.success ? 'Success' : 'Error: '+result.error);
+};
+window.deleteIntegration = async (id) => {
+    if(confirm('Delete?')) await fetch(`/api/integrations/${id}`, { method:'DELETE' });
+    loadIntegrations();
+};
+document.getElementById('newIntegrationBtn').onclick = () => {
+    const name = prompt('Name:'); if(!name) return;
+    const endpoint = prompt('Endpoint URL:'); if(!endpoint) return;
+    const method = prompt('Method (GET/POST):', 'GET');
+    fetch('/api/integrations', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, endpoint, method }) })
+        .then(()=>loadIntegrations());
+};
+loadIntegrations();
+</script>
+{% endblock %}

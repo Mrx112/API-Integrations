@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Execution Logs</h1>
+<table class="data-table">
+    <thead><tr><th>Integration</th><th>Status</th><th>Response Time (ms)</th><th>Executed At</th></tr></thead>
+    <tbody id="logsBody"></tbody>
+</table>
+<div id="paginationControls"></div>
+<script>
+let page=1;
+async function loadLogs(page=1) {
+    const res = await fetch(`/api/logs?page=${page}`);
+    const data = await res.json();
+    let tbody = '';
+    data.items.forEach(l => {
+        tbody += `<tr><td>${l.integration_name||'-'}</td><td>${l.status_code}</td><td>${l.response_time_ms}</td><td>${new Date(l.executed_at).toLocaleString()}</td></tr>`;
+    });
+    document.getElementById('logsBody').innerHTML = tbody;
+    let pagDiv = document.getElementById('paginationControls');
+    pagDiv.innerHTML = '';
+    for(let i=1; i<=data.pages; i++) {
+        let btn = document.createElement('button');
+        btn.innerText = i;
+        btn.onclick = () => loadLogs(i);
+        if(i===page) btn.style.background = '#3b82f6';
+        pagDiv.appendChild(btn);
+    }
+}
+loadLogs();
+</script>
+{% endblock %}
