@@ -197,17 +197,3 @@ Chart.js
 
 Highlight.js
 
-Font Awesome
-
-Happy integrating! 🚀
-
-text
-
----
-
-## 📝 Deskripsi untuk GitHub (short description)
-
-Gunakan teks berikut di bagian **Description** repository GitHub:
-
-```text
-API Integration Platform – a self‑hosted API gateway, integration engine, and analytics dashboard. Test, orchestrate, and monitor any REST API (including AI services) with authentication, webhooks, cron scheduling, full logging, and Docker support.
